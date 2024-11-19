@@ -1,84 +1,93 @@
 import tkinter as tk
-from tkinter import filedialog, messagebox
-from tkinter.ttk import Progressbar, Scale
+from tkinter import filedialog, messagebox, ttk
+from tkinter.ttk import Scale
 from PIL import Image, ImageTk
 import fitz  # PyMuPDF
 import pyttsx3
 import threading
+import queue
+
 
 class PDFToAudioApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("PDF to Audiobook")
-        self.root.geometry("450x700")
-        self.root.configure(bg="#f8f9fa")
+        self.root.title("📚 PDF to Audiobook")
+        self.root.geometry("600x800")
+        self.root.configure(bg="#f0f2f5")
 
         # Variáveis
         self.file_path = None
         self.current_page = 0
         self.total_pages = 0
-        self.pdf_preview_image = None
+        self.is_playing = False
+        self.paused = False
+        self.stop_playback_flag = threading.Event()
+        self.playback_thread = None
+        self.audio_queue = queue.Queue()
+        self.current_text = ""
+        self.current_position = 0
 
-        # Header
-        self.title_label = tk.Label(self.root, text="📚 PDF to Audiobook", font=("Arial", 20, "bold"), bg="#f8f9fa", fg="#2c2c2c")
-        self.title_label.pack(pady=20)
+        # pyttsx3 engine inicializado
+        self.engine = pyttsx3.init()
+        self.engine_lock = threading.Lock()
 
-        # Preview Canvas
-        self.preview_canvas = tk.Canvas(self.root, width=300, height=200, bg="#e9ecef", bd=0, highlightthickness=0)
-        self.preview_canvas.pack(pady=10)
+        # Interface
+        self.create_main_interface()
 
-        # Navegação de página
-        self.page_nav_frame = tk.Frame(self.root, bg="#f8f9fa")
-        self.page_nav_frame.pack(pady=10)
+    def create_main_interface(self):
+        main_container = tk.Frame(self.root, bg="#f0f2f5")
+        main_container.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
 
-        self.prev_btn = tk.Button(
-            self.page_nav_frame, text="◀ Prev", command=lambda: self.render_pdf_preview(self.file_path, self.current_page - 1),
-            bg="#f8f9fa", fg="#4285F4", font=("Arial", 10, "bold"), relief="flat"
-        )
-        self.prev_btn.grid(row=0, column=0, padx=10)
+        # Frame do preview
+        preview_frame = tk.Frame(main_container, bg="white", bd=2, relief="solid")
+        preview_frame.pack(pady=20)
+        self.preview_canvas = tk.Canvas(preview_frame, width=400, height=300, bg="white", bd=0, highlightthickness=0)
+        self.preview_canvas.pack(padx=10, pady=10)
 
-        self.page_label = tk.Label(self.page_nav_frame, text="Page: 0/0", bg="#f8f9fa", font=("Arial", 10), fg="#6c757d")
-        self.page_label.grid(row=0, column=1)
+        # Navegação
+        nav_frame = tk.Frame(main_container, bg="#f0f2f5")
+        nav_frame.pack(pady=10)
+        self.prev_btn = tk.Button(nav_frame, text="◀", command=self.previous_page, font=("Arial", 14),
+                                  bg="#4285F4", fg="white", relief="flat", width=3)
+        self.prev_btn.pack(side=tk.LEFT, padx=5)
+        self.page_label = tk.Label(nav_frame, text="Page: 0/0", font=("Arial", 12), bg="#f0f2f5", fg="#2c3e50")
+        self.page_label.pack(side=tk.LEFT, padx=20)
+        self.next_btn = tk.Button(nav_frame, text="▶", command=self.next_page, font=("Arial", 14),
+                                  bg="#4285F4", fg="white", relief="flat", width=3)
+        self.next_btn.pack(side=tk.LEFT, padx=5)
 
-        self.next_btn = tk.Button(
-            self.page_nav_frame, text="Next ▶", command=lambda: self.render_pdf_preview(self.file_path, self.current_page + 1),
-            bg="#f8f9fa", fg="#4285F4", font=("Arial", 10, "bold"), relief="flat"
-        )
-        self.next_btn.grid(row=0, column=2, padx=10)
+        # Controles de reprodução
+        controls_frame = tk.Frame(main_container, bg="#f0f2f5")
+        controls_frame.pack(pady=20)
+        self.play_pause_btn = tk.Button(controls_frame, text="▶", command=self.toggle_playback, font=("Arial", 12),
+                                        bg="#4285F4", fg="white", relief="flat", width=10, state=tk.DISABLED)
+        self.play_pause_btn.pack(side=tk.LEFT, padx=5)
 
-        # Escolher arquivo
-        self.choose_file_btn = tk.Button(
-            self.root, text="Choose PDF File", command=self.choose_file,
-            font=("Arial", 12), bg="#4285F4", fg="white", relief="flat", height=2, width=20
-        )
+        # Velocidade de leitura
+        speed_frame = tk.Frame(main_container, bg="#f0f2f5")
+        speed_frame.pack(pady=10)
+        tk.Label(speed_frame, text="Voice Speed:", font=("Arial", 10), bg="#f0f2f5", fg="#2c3e50").pack(side=tk.LEFT)
+        self.speed_slider = Scale(speed_frame, from_=0.5, to=2.0, value=1.0, length=200, orient="horizontal")
+        self.speed_slider.pack(side=tk.LEFT, padx=10)
+
+        # Status
+        self.status_label = tk.Label(main_container, text="Ready", font=("Arial", 9), bg="#f0f2f5", fg="#7f8c8d")
+        self.status_label.pack(pady=10)
+
+        # Botão de abrir arquivo
+        self.choose_file_btn = tk.Button(main_container, text="📁 Choose PDF", command=self.choose_file,
+                                         font=("Arial", 12), bg="#4285F4", fg="white", relief="flat")
         self.choose_file_btn.pack(pady=10)
 
-        # Controle de velocidade
-        self.speed_label = tk.Label(self.root, text="Voice Speed:", bg="#f8f9fa", font=("Arial", 10), fg="#6c757d")
-        self.speed_label.pack()
-
-        self.speed_slider = Scale(self.root, from_=0.5, to=1.5, value=1.0, length=300, orient="horizontal")
-        self.speed_slider.pack(pady=10)
-
-        # Botão de conversão
-        self.convert_btn = tk.Button(
-            self.root, text="Convert to Audio", command=self.convert_to_audio,
-            font=("Arial", 12), bg="#4285F4", fg="white", relief="flat", height=2, width=20
-        )
-        self.convert_btn.pack(pady=20)
-
-        # Loading/Progress bar
-        self.progress_bar = Progressbar(self.root, orient="horizontal", length=300, mode="indeterminate")
-        self.progress_bar.pack(pady=20)
-
     def choose_file(self):
-        file_path = filedialog.askopenfilename(filetypes=[("PDF Files", "*.pdf")])
+        file_path = filedialog.askopenfilename(filetypes=[("PDF Files", "*.pdf")], title="Select a PDF file")
         if file_path:
             self.file_path = file_path
             self.render_pdf_preview(file_path)
+            self.play_pause_btn.config(state=tk.NORMAL)
+            self.update_status(f"Loaded: {file_path.split('/')[-1]}")
 
     def render_pdf_preview(self, file_path, page_number=0):
-        """Renderiza uma página do PDF."""
         try:
             doc = fitz.open(file_path)
             total_pages = len(doc)
@@ -91,65 +100,80 @@ class PDFToAudioApp:
             page = doc[page_number]
             pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
             image = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-            image.thumbnail((300, 200))
-            self.pdf_preview_image = ImageTk.PhotoImage(image)
 
+            image.thumbnail((400, 300))
+            self.pdf_preview_image = ImageTk.PhotoImage(image)
             self.preview_canvas.delete("all")
-            self.preview_canvas.create_image(150, 100, image=self.pdf_preview_image)
+            self.preview_canvas.create_image(200, 150, image=self.pdf_preview_image)
 
             self.current_page = page_number
             self.total_pages = total_pages
             self.page_label.config(text=f"Page: {page_number + 1}/{total_pages}")
-
             doc.close()
         except Exception as e:
             messagebox.showerror("Error", f"Error loading preview: {e}")
 
-    def convert_to_audio(self):
-        """Inicia a conversão para áudio."""
-        if not self.file_path:
-            messagebox.showwarning("Warning", "Please select a PDF file!")
-            return
+    def toggle_playback(self):
+        if self.paused:
+            self.paused = False
+            self.play_pause_btn.config(text="⏸")
+            self.start_playback(self.current_text, resume=True)
+        elif not self.is_playing:
+            self.current_position = 0  # Reseta para o início
+            self.start_playback()
+        else:
+            self.paused = True
+            self.is_playing = False
+            self.stop_playback_flag.set()
+            self.play_pause_btn.config(text="▶")
 
-        self.progress_bar.start()
+    def start_playback(self, text=None, resume=False):
+        if text is None:
+            self.current_text = self.extract_text_from_pdf(self.file_path, self.current_page)
+        self.is_playing = True
+        self.stop_playback_flag.clear()
 
-        def task():
-            try:
-                # Extraindo texto
-                text = self.extract_text_from_pdf(self.file_path)
-                if not text.strip():
-                    messagebox.showerror("Error", "The PDF has no readable text.")
-                    return
+        def playback_task():
+            with self.engine_lock:
+                if resume:
+                    text_to_speak = self.current_text[self.current_position:]
+                else:
+                    text_to_speak = self.current_text
 
-                # Conversão
-                self.text_to_audio(text)
-                messagebox.showinfo("Success", "Audio conversion completed!")
-            except Exception as e:
-                messagebox.showerror("Error", f"Error: {e}")
-            finally:
-                self.progress_bar.stop()
+                self.engine.setProperty("rate", int(self.speed_slider.get() * 150))
+                self.engine.say(text_to_speak)
+                self.engine.runAndWait()
 
-        threading.Thread(target=task).start()
+            self.is_playing = False
+            self.play_pause_btn.config(text="▶")
 
-    def extract_text_from_pdf(self, file_path):
-        """Extrai o texto do PDF."""
+        self.playback_thread = threading.Thread(target=playback_task)
+        self.playback_thread.start()
+
+    def extract_text_from_pdf(self, file_path, page_number):
         try:
             doc = fitz.open(file_path)
-            text = "".join([page.get_text() for page in doc])
+            page = doc[page_number]
+            text = page.get_text()
             doc.close()
             return text
         except Exception as e:
             messagebox.showerror("Error", f"Error extracting text: {e}")
             return ""
 
-    def text_to_audio(self, text):
-        """Converte o texto em áudio."""
-        engine = pyttsx3.init()
-        engine.setProperty("rate", int(self.speed_slider.get() * 150))  # Ajusta a velocidade
-        engine.setProperty("voice", "com.apple.speech.synthesis.voice.monica")  # Teste voz personalizada
-        engine.say(text)
-        engine.save_to_file(text, "audiobook.mp3")
-        engine.runAndWait()
+    def previous_page(self):
+        if self.current_page > 0:
+            self.current_page -= 1
+            self.render_pdf_preview(self.file_path, self.current_page)
+
+    def next_page(self):
+        if self.current_page < self.total_pages - 1:
+            self.current_page += 1
+            self.render_pdf_preview(self.file_path, self.current_page)
+
+    def update_status(self, message):
+        self.status_label.config(text=message)
+        self.root.update_idletasks()
 
 
 if __name__ == "__main__":
